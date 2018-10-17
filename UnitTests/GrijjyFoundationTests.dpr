@@ -18,7 +18,9 @@ uses
   Tests.Grijjy.Collections.Dictionaries in 'Tests\Tests.Grijjy.Collections.Dictionaries.pas',
   Tests.Grijjy.Bson in 'Tests\Tests.Grijjy.Bson.pas',
   Tests.Grijjy.Bson.IO in 'Tests\Tests.Grijjy.Bson.IO.pas',
-  Tests.Grijjy.Bson.Serialization in 'Tests\Tests.Grijjy.Bson.Serialization.pas';
+  Tests.Grijjy.Bson.Serialization in 'Tests\Tests.Grijjy.Bson.Serialization.pas',
+  Tests.Grijjy.ProtocolBuffers in 'Tests\Tests.Grijjy.ProtocolBuffers.pas',
+  Tests.Grijjy.PropertyBag in 'Tests\Tests.Grijjy.PropertyBag.pas';
 
 var
   runner : ITestRunner;

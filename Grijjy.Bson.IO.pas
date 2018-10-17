@@ -1843,7 +1843,7 @@ uses
   System.Character,
   System.RTLConsts,
   System.DateUtils,
-  {$IF Defined(IOS)}
+  {$IF Defined(MACOS)}
   Macapi.CoreFoundation,
   {$ENDIF}
   Grijjy.SysUtils,
@@ -2321,7 +2321,8 @@ begin
 
   FOutput.WriteInt32(Length(Bytes));
   FOutput.WriteBinarySubType(SubType);
-  FOutput.Write(Bytes[0], Length(Bytes));
+  if Assigned(Bytes) then
+    FOutput.Write(Bytes[0], Length(Bytes));
   State := GetNextState;
 end;
 
@@ -3442,7 +3443,8 @@ end;
 
 procedure TgoJsonWriter.TOutput.Append(const AValue: String);
 begin
-  Append(AValue[Low(String)], Length(AValue) * SizeOf(Char));
+  if (AValue <> '') then
+    Append(AValue[Low(String)], Length(AValue) * SizeOf(Char));
 end;
 
 procedure TgoJsonWriter.TOutput.Append(const AValue: Integer);
@@ -4588,7 +4590,8 @@ function TgoBsonReader.TInput.ReadBytes(const ASize: Integer): TBytes;
 begin
   Assert(ASize >= 0);
   SetLength(Result, ASize);
-  Read(Result[0], ASize);
+  if (Result <> nil) then
+    Read(Result[0], ASize);
 end;
 
 function TgoBsonReader.TInput.ReadCString: String;
@@ -6421,6 +6424,10 @@ begin
   AToken.Initialize(TTokenType.LeftParen, @LEXEME_LEFT_PAREN, 1);
 end;
 
+{$IFOPT Q+}
+  {$DEFINE HAS_OVERFLOWCHECKS}
+  {$OVERFLOWCHECKS OFF}
+{$ENDIF}
 class procedure TgoJsonReader.TScanner.CharNumberToken(var ABuffer: TBuffer;
   const AChar: Char; const AToken: TToken);
 { Lexical grammar:
@@ -6447,7 +6454,6 @@ begin
   ABuffer.ClearErrorPos;
   Current := ABuffer.Current;
   Start := Current - 1;
-  C := 0;
 
   { NumberLiteral: ['-'] DecimalLiteral }
   if (AChar = '-') then
@@ -6613,6 +6619,9 @@ begin
   else
     raise ABuffer.ParseError(@RS_BSON_INVALID_NUMBER);
 end;
+{$IFDEF HAS_OVERFLOWCHECKS}
+  {$OVERFLOWCHECKS ON}
+{$ENDIF}
 
 class procedure TgoJsonReader.TScanner.CharRegularExpressionToken(
   var ABuffer: TBuffer; const AChar: Char; const AToken: TToken);
@@ -7361,6 +7370,7 @@ procedure TgoBsonDocumentReader.TContext.Initialize(
 begin
   FContextType := AContextType;
   FDocument := ADocument;
+  FIndex := 0;
 end;
 
 procedure TgoBsonDocumentReader.TContext.Initialize(
@@ -7368,6 +7378,7 @@ procedure TgoBsonDocumentReader.TContext.Initialize(
 begin
   FContextType := AContextType;
   FArray := AArray;
+  FIndex := 0;
 end;
 
 function TgoBsonDocumentReader.TContext.TryGetNextElement(

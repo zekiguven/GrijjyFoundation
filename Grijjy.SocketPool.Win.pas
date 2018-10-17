@@ -80,25 +80,13 @@ type
     Operation: TgoSocketOperation;
   end;
 
-  { Socket instance }
-  TgoSocket = record
-  private
-    FHandle: TSocket;
-    FHostname: String;
-    FPort: Word;
-  public
-    procedure Initialize(const AHostname: String; const APort: Word);
-  public
-    property Handle: TSocket read FHandle write FHandle;
-    property Hostname: String read FHostname write FHostname;
-    property Port: Word read FPort write FPort;
-  end;
-
   { Socket connection instance }
   TgoSocketConnection = class(TObject)
   private
     FOwner: TgoClientSocketManager;
-    FSocket: TgoSocket;
+    FSocket: THandle;
+    FHostname: String;
+    FPort: Word;
     FState: TgoConnectionState;
     FOpenSSL: TgoOpenSSL;
     FReleased: TDateTime;
@@ -114,8 +102,10 @@ type
     FReadBuffer: Pointer;
 
     { Log WSA and System related errors }
+    {$IFDEF GRIJJYLOGGING}
     procedure HandleWSAError(const AError: String);
     procedure HandleError(const AError: String);
+    {$ENDIF}
 
     { Pending operations }
     function AddRef(const AOperation: TgoSocketOperation): Boolean; inline;
@@ -186,9 +176,6 @@ type
 
     { Write data to the socket }
     function Write(const ABuffer: Pointer; const ASize: Integer): Boolean; inline;
-
-    { Disconnects the socket }
-    procedure Disconnect;
   public
     constructor Create(const AOwner: TgoClientSocketManager; const AHostname: String; const APort: Word);
     destructor Destroy; override;
@@ -196,8 +183,12 @@ type
     { Connects the socket }
     function Connect(const AUseNagle: Boolean = True): Boolean;
 
+    { Disconnects the socket }
+    procedure Disconnect;
+
     { Sends the bytes to the socket }
-    function Send(const ABytes: TBytes): Boolean;
+    function Send(const ABuffer: Pointer; const ASize: Integer): Boolean; overload;
+    function Send(const ABytes: TBytes): Boolean; overload;
 
     { Returns the pending operations as a string }
     function PendingToString: String;
@@ -206,7 +197,13 @@ type
     procedure StopCallbacks;
   public
     { Socket handle }
-    property Socket: TgoSocket read FSocket write FSocket;
+    property Socket: THandle read FSocket write FSocket;
+
+    { Hostname }
+    property Hostname: String read FHostname;
+
+    { Port }
+    property Port: Word read FPort;
 
     { Current state of the socket connection }
     property State: TgoConnectionState read FState write FState;
@@ -297,7 +294,15 @@ type
 
 implementation
 
+{$IFDEF GRIJJYLOGGING}
+uses
+  Grijjy.System.Logging;
+{$ENDIF}
+
 var
+  {$IFDEF GRIJJYLOGGING}
+  _Log: TgoLogging;
+  {$ENDIF}
   _PerIoDataPool, _MemBufferPool: TgoMemoryPool;
 
 function HasOverlappedIoCompleted(const PerIoData: PPerIoData): BOOL;
@@ -329,15 +334,6 @@ begin
     (AValue = WSAECONNRESET) or (AValue = WSAESHUTDOWN);
 end;
 
-{ TgoSocket }
-
-procedure TgoSocket.Initialize(const AHostname: String; const APort: Word);
-begin
-  FHandle := 0;
-  FHostname := AHostname;
-  FPort := APort;
-end;
-
 { TgoSocketConnection }
 
 constructor TgoSocketConnection.Create(const AOwner: TgoClientSocketManager; const AHostname: String; const APort: Word);
@@ -346,7 +342,8 @@ var
 begin
   inherited Create;
   FOwner := AOwner;
-  FSocket.Initialize(AHostname, APort);
+  FHostname := AHostname;
+  FPort := APort;
   FState := TgoConnectionState.Disconnected;
   for Operation := Low(TgoSocketOperation) to High(TgoSocketOperation) do
     FPending[Operation] := 0;
@@ -393,24 +390,26 @@ begin
   Result := ALastError <> 10053;
 end;
 
+{$IFDEF GRIJJYLOGGING}
 procedure TgoSocketConnection.HandleWSAError(const AError: String);
-//var
-//  LastError: Integer;
+var
+  LastError: Integer;
 begin
-//  LastError := WSAGetLastError;
-//  if IsFatalError(LastError) then
-//    _Log.Send(Format('Warning! WSA %s (Socket=%d, Connection=%d, ThreadId=%d, LastError=%d, SysErrorMessage=%s)',
-//      [AError, FSocket.Handle, Cardinal(Self), GetCurrentThreadId, LastError, SysErrorMessage(LastError)]));
+  LastError := WSAGetLastError;
+  if IsFatalError(LastError) then
+    _Log.Send(Format('Warning! WSA %s (Socket=%d, Connection=%d, ThreadId=%d, LastError=%d, SysErrorMessage=%s)',
+      [AError, FSocket, Cardinal(Self), GetCurrentThreadId, LastError, SysErrorMessage(LastError)]));
 end;
 
 procedure TgoSocketConnection.HandleError(const AError: String);
-//var
-//  LastError: Integer;
+var
+  LastError: Integer;
 begin
-//  LastError := GetLastError;
-//  _Log.Send(Format('Warning! %s (Socket=%d, Connection=%d, ThreadId=%d, LastError=%d, SysErrorMessage=%s)',
-//    [AError, FSocket.Handle, Cardinal(Self), GetCurrentThreadId, LastError, SysErrorMessage(LastError)]));
+  LastError := GetLastError;
+  _Log.Send(Format('Warning! %s (Socket=%d, Connection=%d, ThreadId=%d, LastError=%d, SysErrorMessage=%s)',
+    [AError, FSocket, Cardinal(Self), GetCurrentThreadId, LastError, SysErrorMessage(LastError)]));
 end;
+{$ENDIF}
 
 function TgoSocketConnection.AddRef(const AOperation: TgoSocketOperation): Boolean;
 begin
@@ -506,7 +505,9 @@ begin
   { did ALPN negotation succeed? }
   if FALPN and not OpenSSL.ALPN then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleError('ALPN negotation failed for SSL.');
+    {$ENDIF}
     Exit;
   end;
 
@@ -616,18 +617,21 @@ var
 begin
   Result := False;
   if not AddRef(TgoSocketOperation.ReadZero) then Exit;
+  //_Log('PostReadZero');
   PerIoData := _PerIoDataPool.RequestMem('_TgoSocketConnection.PostReadZero.PerIoData');
-  PerIoData.Socket := FSocket.Handle;
+  PerIoData.Socket := FSocket;
   PerIoData.Operation := TgoSocketOperation.ReadZero;
   PerIoData.WsaBuf.Buf := nil;
   PerIoData.WsaBuf.Len := 0;
   Flags := 0;
   Bytes := 0;
-  if (WSARecv(FSocket.Handle, @PerIoData.WsaBuf, 1, Bytes, Flags,
+  if (WSARecv(FSocket, @PerIoData.WsaBuf, 1, Bytes, Flags,
     PWSAOverlapped(PerIoData), nil) = SOCKET_ERROR) and
     (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleWSAError('PostReadZero.WSARecv');
+    {$ENDIF}
     _PerIoDataPool.ReleaseMem(PerIoData, '_TgoSocketConnection.PostReadZero.PerIoData');
     ReleaseRef(TgoSocketOperation.ReadZero);
   end
@@ -642,18 +646,21 @@ var
 begin
   Result := False;
   if not AddRef(TgoSocketOperation.Read) then Exit;
+  //_Log('PostRead');
   PerIoData := _PerIoDataPool.RequestMem('_TgoSocketConnection.PostRead.PerIoData');
-  PerIoData.Socket := FSocket.Handle;
+  PerIoData.Socket := FSocket;
   PerIoData.Operation := TgoSocketOperation.Read;
   PerIoData.WsaBuf.Buf := ABuffer;
   PerIoData.WsaBuf.Len := DEFAULT_BLOCK_SIZE;
   Flags := 0;
   Bytes := 0;
-  if (WSARecv(FSocket.Handle, @PerIoData.WsaBuf, 1, Bytes, Flags,
+  if (WSARecv(FSocket, @PerIoData.WsaBuf, 1, Bytes, Flags,
     PWSAOverlapped(PerIoData), nil) = SOCKET_ERROR) and
     (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleWSAError('PostRead.WSARecv');
+    {$ENDIF}
     _PerIoDataPool.ReleaseMem(PerIoData, '_TgoSocketConnection.PostRead.PerIoData');
     ReleaseRef(TgoSocketOperation.Read);
   end
@@ -670,17 +677,20 @@ var
 begin
   Result := False;
   if not AddRef(TgoSocketOperation.Write) then Exit;
+  //_Log('PostWrite');
   WriteBuffer := _MemBufferPool.RequestMem('_TgoSocketConnection.PostWrite.WriteBuffer');
   Move(ABuffer^, WriteBuffer^, ASize);
   PerIoData := _PerIoDataPool.RequestMem(('_TgoSocketConnection.PostWrite.PerIoData'));
-  PerIoData.Socket := FSocket.Handle;
+  PerIoData.Socket := FSocket;
   PerIoData.Operation := TgoSocketOperation.Write;
   PerIoData.WsaBuf.Buf := WriteBuffer;
   PerIoData.WsaBuf.Len := ASize;
-  if (WSASend(FSocket.Handle, @PerIoData.WsaBuf, 1, Bytes, 0, PWSAOverlapped(PerIoData), nil) = SOCKET_ERROR) and
+  if (WSASend(FSocket, @PerIoData.WsaBuf, 1, Bytes, 0, PWSAOverlapped(PerIoData), nil) = SOCKET_ERROR) and
     (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleWSAError('PostWrite.WSASend');
+    {$ENDIF}
     _PerIoDataPool.ReleaseMem(PerIoData, '_TgoSocketConnection.PostWrite.PerIoData');
     _MemBufferPool.ReleaseMem(WriteBuffer, '_TgoSocketConnection.PostWrite.WriteBuffer');
     ReleaseRef(TgoSocketOperation.Write);
@@ -711,35 +721,43 @@ begin
   if getaddrinfo(PWideChar(AHostname), PWideChar(Port), @Hints, @AddrInfo) <> 0
   then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleWSAError('PostConnect.getaddrinfo');
+    {$ENDIF}
     Exit;
   end;
 
   try
     { create an overlapped socket }
-    FSocket.Handle := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
+    FSocket := WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, nil, 0,
       WSA_FLAG_OVERLAPPED);
-    if FSocket.Handle = INVALID_SOCKET then
+    if FSocket = INVALID_SOCKET then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleWSAError('PostConnect.WSASocket');
+      {$ENDIF}
       Exit;
     end;
 
     { set SO_SNDBUF to zero for a zero-copy network stack as we maintain the buffers }
     Size := 0;
-    if setsockopt(FSocket.Handle, SOL_SOCKET, SO_SNDBUF, @Size, SizeOf(Size)) = SOCKET_ERROR
+    if setsockopt(FSocket, SOL_SOCKET, SO_SNDBUF, @Size, SizeOf(Size)) = SOCKET_ERROR
     then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleError('PostConnect.setsockopt');
+      {$ENDIF}
       Exit;
     end;
 
     { set SO_RCVBUF to zero for a zero-copy network stack as we maintain the buffers }
     Size := 0;
-    if setsockopt(FSocket.Handle, SOL_SOCKET, SO_RCVBUF, @Size, SizeOf(Size)) = SOCKET_ERROR
+    if setsockopt(FSocket, SOL_SOCKET, SO_RCVBUF, @Size, SizeOf(Size)) = SOCKET_ERROR
     then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleError('PostConnect.setsockopt');
+      {$ENDIF}
       Exit;
     end;
 
@@ -747,9 +765,11 @@ begin
     if not AUseNagle then
     begin
       Size := 0;
-      if setsockopt(FSocket.Handle, IPPROTO_TCP, TCP_NODELAY, @Size, SizeOf(Size)) = SOCKET_ERROR then
+      if setsockopt(FSocket, IPPROTO_TCP, TCP_NODELAY, @Size, SizeOf(Size)) = SOCKET_ERROR then
       begin
+        {$IFDEF GRIJJYLOGGING}
         HandleError('PostConnect.setsockopt');
+        {$ENDIF}
         Exit;
       end;
     end;
@@ -758,37 +778,44 @@ begin
     ConnectAddr.sin_family := AF_INET;
     ConnectAddr.sin_addr.S_addr := INADDR_ANY;
     ConnectAddr.sin_port := 0;
-    if bind(FSocket.Handle, @ConnectAddr, SizeOf(ConnectAddr)) = SOCKET_ERROR then
+    if bind(FSocket, @ConnectAddr, SizeOf(ConnectAddr)) = SOCKET_ERROR then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleWSAError('PostConnect.bind');
-      closesocket(FSocket.Handle);
+      {$ENDIF}
+      closesocket(FSocket);
       Closed := True;
       Exit;
     end;
 
     { associate socket and connection object with completion port }
-    if CreateIoCompletionPort(FSocket.Handle, FOwner.Handle, ULONG_PTR(Self), 0) = 0
+    if CreateIoCompletionPort(FSocket, FOwner.Handle, ULONG_PTR(Self), 0) = 0
     then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleError('PostConnect.CreateIoCompletionPort');
-      closesocket(FSocket.Handle);
+      {$ENDIF}
+      closesocket(FSocket);
       Closed := True;
       Exit;
     end;
 
     { queue a connect command to the completion port }
+    //_Log('PostConnect');
     if not AddRef(TgoSocketOperation.Connect) then Exit;
     PerIoData := _PerIoDataPool.RequestMem('_TgoSocketConnection.PostConnect.PerIoData');
-    PerIoData.Socket := FSocket.Handle;
+    PerIoData.Socket := FSocket;
     PerIoData.Operation := TgoSocketOperation.Connect;
-    if not ConnectEx(FSocket.Handle, AddrInfo.ai_addr, AddrInfo.ai_addrlen, nil, 0,
+    if not ConnectEx(FSocket, AddrInfo.ai_addr, AddrInfo.ai_addrlen, nil, 0,
       PCardinal(0)^, PWSAOverlapped(PerIoData)) and
       (WSAGetLastError <> WSA_IO_PENDING) then
     begin
+      {$IFDEF GRIJJYLOGGING}
       HandleWSAError('PostConnect.ConnectEx');
+      {$ENDIF}
       _PerIoDataPool.ReleaseMem(PerIoData, '_TgoSocketConnection.PostConnect.PerIoData');
       ReleaseRef(TgoSocketOperation.Connect);
-      closesocket(FSocket.Handle);
+      closesocket(FSocket);
       Closed := True;
     end
     else
@@ -804,13 +831,17 @@ var
 begin
   Result := False;
   if not AddRef(TgoSocketOperation.Disconnect) then Exit;
+  if FSocket = 0 then Exit;
+  //_Log('PostDisconnect');
   PerIoData := _PerIoDataPool.RequestMem('_TgoSocketConnection.PostDisconnect.PerIoData');
-  PerIoData.Socket := FSocket.Handle;
+  PerIoData.Socket := FSocket;
   PerIoData.Operation := TgoSocketOperation.Disconnect;
-  if not DisconnectEx(FSocket.Handle, PWSAOverlapped(PerIoData), TF_REUSE_SOCKET, 0)
+  if not DisconnectEx(FSocket, PWSAOverlapped(PerIoData), TF_REUSE_SOCKET, 0)
     and (WSAGetLastError <> WSA_IO_PENDING) then
   begin
+    {$IFDEF GRIJJYLOGGING}
     HandleWSAError('PostDisconnect.DisconnectEx');
+    {$ENDIF}
     _PerIoDataPool.ReleaseMem(PerIoData, '_TgoSocketConnection.PostDisconnect.PerIoData');
     ReleaseRef(TgoSocketOperation.Disconnect);
   end
@@ -854,7 +885,7 @@ end;
 function TgoSocketConnection.Connect(const AUseNagle: Boolean): Boolean;
 begin
   Reset;
-  if PostConnect(FSocket.Hostname, FSocket.Port, AUseNagle) then
+  if PostConnect(FHostname, FPort, AUseNagle) then
     Result := True
   else
     Result := False;
@@ -862,6 +893,8 @@ end;
 
 procedure TgoSocketConnection.Disconnect;
 begin
+  //_Log('Disconnect');
+
   { if not already shutdown, then post disconnect }
   if not Shutdown then
   begin
@@ -872,24 +905,27 @@ begin
   end;
 end;
 
-function TgoSocketConnection.Send(const ABytes: TBytes): Boolean;
+function TgoSocketConnection.Send(const ABuffer: Pointer;
+  const ASize: Integer): Boolean;
 var
   Index: Integer;
   BlockSize: Integer;
+  Bytes: PByte;
 begin
   Result := True;
   Index := 0;
+  Bytes := ABuffer;
   { we chunk the buffer to match the memory pool block size to
     avoid memory reallocations }
-  if Length(ABytes) < DEFAULT_BLOCK_SIZE then
-    BlockSize := Length(ABytes)
+  if ASize < DEFAULT_BLOCK_SIZE then
+    BlockSize := ASize
   else
     BlockSize := DEFAULT_BLOCK_SIZE;
-  while Index < Length(ABytes) do
+  while Index < ASize do
   begin
-    if Length(ABytes) - Index < BlockSize then
-      BlockSize := Length(ABytes) - Index;
-    if Write(@ABytes[Index], BlockSize) then
+    if ASize - Index < BlockSize then
+      BlockSize := ASize - Index;
+    if Write(@Bytes[Index], BlockSize) then
       Inc(Index, BlockSize)
     else
     begin
@@ -898,6 +934,11 @@ begin
       Break; { write failed }
     end;
   end;
+end;
+
+function TgoSocketConnection.Send(const ABytes: TBytes): Boolean;
+begin
+  Result := Send(@ABytes[0], Length(ABytes));
 end;
 
 procedure TgoSocketConnection.Read(const ABuffer: Pointer;
@@ -931,9 +972,6 @@ end;
 constructor TSocketPoolWorker.Create(const AOwner: TgoClientSocketManager);
 begin
   inherited Create;
-  {$IFDEF DEBUG}
-  NameThreadForDebugging('TSocketPoolWorker');
-  {$ENDIF}
   FOwner := AOwner;
 end;
 
@@ -951,6 +989,9 @@ var
   ReadBuffer: Pointer;
   Error: Integer;
 begin
+  {$IFDEF DEBUG}
+  NameThreadForDebugging('TSocketPoolWorker');
+  {$ENDIF}
   while True do
   begin
     ReturnValue := GetQueuedCompletionStatus(FOwner.FHandle, BytesTransferred,
@@ -991,6 +1032,7 @@ begin
                       end
                       //else
                       //  { connection reset by peer }
+                      //  _Log('Read.BytesTransferred = 0');
                     end;
                   TgoSocketOptimization.Scale:
                     begin
@@ -1007,6 +1049,7 @@ begin
                         end
                         //else
                         //  { connection reset by peer }
+                        //  _Log('Read.BytesTransferred = 0');
                       finally
                         { make sure we release the receive buffer we previously
                           allocated when returning from a pending readzero }
@@ -1030,6 +1073,7 @@ begin
                   end
                   //else
                   //  { connection reset by peer }
+                  //  _Log('Write.BytesTransferred = 0');
                 finally
                   _MemBufferPool.ReleaseMem(PerIoData.WsaBuf.Buf, '_TgoSocketConnection.PostWrite.WriteBuffer');
                 end;
@@ -1093,9 +1137,11 @@ begin
           Error := WSAGetLastError;
           try
             { ERROR_NETNAME_DELETED happens when the connection was reset while operations were still pending }
-//            if Error <> ERROR_NETNAME_DELETED then
-//              _Log.Send(Format('Warning! GetQueuedCompletionStatus (Socket=%d, ThreadId=%d, Operation=%s, Error=%d)',
-//                [PerIoData.Socket, GetCurrentThreadId, OperationToString(PerIoData.Operation), Error]));
+            {$IFDEF GRIJJYLOGGING}
+            if Error <> ERROR_NETNAME_DELETED then
+              _Log.Send(Format('Warning! GetQueuedCompletionStatus (Socket=%d, ThreadId=%d, Operation=%s, Error=%d)',
+                [PerIoData.Socket, GetCurrentThreadId, OperationToString(PerIoData.Operation), Error]));
+            {$ENDIF}
 
             { these are potential error codes for operations that are
               queued after the socket is closed }
@@ -1116,10 +1162,16 @@ begin
       begin
         if Connection <> nil then { Connection object is valid }
         begin
+          //_Log('Status, Pending=' + IntToStr(Connection.Pending));
           if Connection.ReleaseRefCheckShutdown(PerIoData.Operation) then
           begin
             { free the socket handle }
-            closesocket(Connection.Socket.Handle);
+            closesocket(Connection.Socket);
+
+            {$IFDEF GRIJJYLOGGING}
+            _Log.Send(Format('Closesocket (Socket=%d, Connection=%d, ThreadId=%d) Pending=%s',
+              [Connection.Socket, Cardinal(Self), GetCurrentThreadId, Connection.PendingToString]));
+            {$ENDIF}
 
             { trigger closed event }
             Connection.Closed := True;
@@ -1138,6 +1190,7 @@ begin
       end;
     end;
   end;
+  //Log('Worker thread finished.');
 end;
 
 { TgoClientSocketManager }
@@ -1149,9 +1202,6 @@ var
   Workers: Integer;
 begin
   inherited Create;
-  {$IFDEF DEBUG}
-  NameThreadForDebugging('TgoClientSocketManager');
-  {$ENDIF}
   FOptimization := AOptimization;
   FBehavior := ABehavior;
 
@@ -1170,6 +1220,9 @@ begin
     if Workers < 2 then
       Workers := 2; { minimum number of workers }
 
+    {$IFDEF GRIJJYLOGGING}
+    _Log.Send(Format('Starting %d workers', [Workers]));
+    {$ENDIF}
     SetLength(FWorkers, Workers);
     SetLength(FWorkerHandles, Workers);
     for I := 0 to Workers - 1 do
@@ -1177,6 +1230,9 @@ begin
       FWorkers[I] := TSocketPoolWorker.Create(Self);
       FWorkerHandles[I] := FWorkers[I].Handle;
     end;
+    {$IFDEF GRIJJYLOGGING}
+    _Log.Send('Workers started');
+    {$ENDIF}
   end
   else
     raise Exception.Create('CreateIoCompletionPort failed, ' +
@@ -1187,8 +1243,8 @@ destructor TgoClientSocketManager.Destroy;
 var
   Worker: TSocketPoolWorker;
   Timeout: LongWord;
-  P: Pointer;
   Connection: TgoSocketConnection;
+  Start: TDateTime;
 begin
   inherited Destroy;
 
@@ -1211,12 +1267,18 @@ begin
   { destroy all pending connections }
   ConnectionsLock.Enter;
   try
-    for P in Connections.ToArray do
+    for Connection in Connections.ToArray do
     begin
-      Connection := TgoSocketConnection(P);
       if not Connection.Closed then
-        closesocket(Connection.Socket.Handle);
-      Connection.Free;
+      begin
+        closesocket(Connection.Socket);
+        Start := Now;
+        while (MillisecondsBetween(Now, Start) < TIMEOUT_CLOSE) and
+          (not Connection.Closed) do
+          Sleep(5);
+      end;
+      if Connection.Closed then
+        Connection.Free;
     end;
     Connections.Free;
   finally
@@ -1225,6 +1287,9 @@ begin
   ConnectionsLock.Free;
 
   { signal the workers to quit }
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Send('Signaling workers to quit');
+  {$ENDIF}
   for Worker in FWorkers do
   begin
     PostQueuedCompletionStatus(FHandle, 0, 0, nil);
@@ -1235,6 +1300,9 @@ begin
   Timeout := TIMEOUT_STOP;
   WaitForMultipleObjects(Length(FWorkerHandles), Pointer(FWorkerHandles),
     True, Timeout);
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Send('Workers finished');
+  {$ENDIF}
 
   { destroy workers }
   for Worker in FWorkers do
@@ -1247,21 +1315,24 @@ end;
 
 procedure TgoClientSocketManager.FreeConnections;
 var
-  P: Pointer;
   Connection: TgoSocketConnection;
-  ConnectionsToFree: TList<Pointer>;
+  ConnectionsToFree: TList<TgoSocketConnection>;
 begin
-  ConnectionsToFree := TList<Pointer>.Create;
+  ConnectionsToFree := TList<TgoSocketConnection>.Create;
   try
     ConnectionsLock.Enter;
     try
-      for P in Connections.ToArray do
+      {$IFDEF GRIJJYLOGGING}
+      _Log.Send('Checking for connections to free...');
+      if Connections.Count > 0 then
+        _Log.Send(Format('%d connections waiting to be freed', [Connections.Count]));
+      {$ENDIF}
+      for Connection in Connections.ToArray do
       begin
-        Connection := TgoSocketConnection(P);
         if Connection.Closed then
         begin
-          ConnectionsToFree.Add(P);
-          Connections.Remove(P);
+          ConnectionsToFree.Add(Connection);
+          Connections.Remove(Connection);
         end
         else
         if MillisecondsBetween(Now, Connection.FReleased) > INTERVAL_FREE then
@@ -1273,17 +1344,29 @@ begin
           begin
             { if the socket did not disconnect normally, we attempt to close the socket manually }
             Connection.FAttemptCloseSocket := True;
-            closesocket(Connection.Socket.Handle);
-          end;
+            closesocket(Connection.Socket);
+          end
+          {$IFDEF GRIJJYLOGGING}
+          else
+            _Log.Send(Format('Error! Closing connection failed (Socket=%d, Connection=%d, ThreadId=%d) Pending=%s',
+            [Connection.Socket, Cardinal(Connection), GetCurrentThreadId, Connection.PendingToString]));
+          {$ENDIF}
         end;
       end;
     finally
       ConnectionsLock.Leave;
     end;
 
-    for P in ConnectionsToFree do
+    {$IFDEF GRIJJYLOGGING}
+    if ConnectionsToFree.Count > 0 then
+      _Log.Send(Format('Freeing %d connections', [ConnectionsToFree.Count]));
+    {$ENDIF}
+
+    for Connection in ConnectionsToFree do
     begin
-      Connection := TgoSocketConnection(P);
+      {$IFDEF GRIJJYLOGGING}
+      _Log.Send(Format('Freeing connection (Socket=%d, Connection=%d, ThreadId=%d)', [Connection.Socket, Cardinal(Connection), GetCurrentThreadId]));
+      {$ENDIF}
       Connection.Free;
     end;
   finally
@@ -1295,6 +1378,9 @@ procedure TgoClientSocketManager.Execute;
 var
   LastCleanup: TDateTime;
 begin
+  {$IFDEF DEBUG}
+  NameThreadForDebugging('TgoClientSocketManager');
+  {$ENDIF}
   LastCleanup := Now;
   while not Terminated do
   begin
@@ -1309,7 +1395,19 @@ begin
 end;
 
 procedure TgoClientSocketManager.Release(const AConnection: TgoSocketConnection);
+{$IFDEF GRIJJYLOGGING}
+var
+  Socket: TSocket;
+{$ENDIF}
 begin
+  {$IFDEF GRIJJYLOGGING}
+  Socket := AConnection.Socket;
+  {$ENDIF}
+
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Send(Format('Releasing connection (Socket=%d, Connection=%d, ThreadId=%d)', [Socket, Cardinal(AConnection), GetCurrentThreadId]));
+  {$ENDIF}
+
   { disconnect the socket }
   if FBehavior = TgoSocketPoolBehavior.CreateAndDestroy then
     AConnection.Disconnect;
@@ -1317,10 +1415,18 @@ begin
   { track the release time }
   AConnection.FReleased := Now;
 
+  { stop events }
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Send(Format('Stopping callbacks for connection (Socket=%d, Connection=%d, ThreadId=%d)', [Socket, Cardinal(AConnection), GetCurrentThreadId]));
+  {$ENDIF}
+
   { it is critical that we prevent future callbacks because the parent method
     that calls HandleFree() will be destroying other objects that may be accessed
     in those events }
   AConnection.StopCallbacks;
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Send(Format('Callbacks stopped for connection (Socket=%d, Connection=%d, ThreadId=%d)', [Socket, Cardinal(AConnection), GetCurrentThreadId]));
+  {$ENDIF}
 
   { add the new connection }
   ConnectionsLock.Enter;
@@ -1333,7 +1439,6 @@ end;
 
 function TgoClientSocketManager.Request(const AHostname: String; const APort: Word): TgoSocketConnection;
 var
-  P: Pointer;
   Connection: TgoSocketConnection;
 begin
   if FBehavior = TgoSocketPoolBehavior.CreateAndDestroy then
@@ -1344,11 +1449,10 @@ begin
     Result := nil;
     ConnectionsLock.Enter;
     try
-      for P in Connections.ToArray do
+      for Connection in Connections.ToArray do
       begin
-        Connection := TgoSocketConnection(P);
         if (Connection.State = TgoConnectionState.Connected) and
-          (Connection.Socket.Hostname = AHostname) and (Connection.Socket.Port = APort) then
+          (Connection.Hostname = AHostname) and (Connection.Port = APort) then
         begin
           Connections.Remove(Connection);
           Result := Connection;
@@ -1364,11 +1468,17 @@ begin
 end;
 
 initialization
+  {$IFDEF GRIJJYLOGGING}
+  _Log := TgoLogging.Create([TgoLog.ToFile, TgoLog.ToConsole, TgoLog.ToDefault], 'SocketPool');
+  {$ENDIF}
   _PerIoDataPool := TgoMemoryPool.Create(SizeOf(TPerIoData));
   _MemBufferPool := TgoMemoryPool.Create(DEFAULT_BLOCK_SIZE);
 
 finalization
   _PerIoDataPool.Free;
   _MemBufferPool.Free;
+  {$IFDEF GRIJJYLOGGING}
+  _Log.Free;
+  {$ENDIF}
 
 end.

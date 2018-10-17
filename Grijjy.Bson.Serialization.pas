@@ -709,6 +709,7 @@ type
       function GetTypeKind: TTypeKind; inline;
     public
       constructor Create(const ATypeInfo: PTypeInfo);
+      procedure Setup; virtual;
 
       property TypeInfo: PTypeInfo read FTypeInfo;
       property TypeKind: TTypeKind read GetTypeKind;
@@ -976,8 +977,9 @@ type
     protected
       procedure Initialize(const AStructType: TRttiType); virtual;
     public
-      constructor Create(const ATypeInfo: PTypeInfo);
       destructor Destroy; override;
+
+      procedure Setup; override;
     end;
   private type
     TInitializeRecordProc = procedure(const ASelf: Pointer);
@@ -2164,7 +2166,7 @@ begin
       Result := UInt32(AReader.ReadInt32);
 
     TgoBsonType.Int64:
-      Result := AReader.ReadInt64;
+      Result := UInt32(AReader.ReadInt64);
 
     TgoBsonType.String:
       Result := StrToInt64(AReader.ReadString);
@@ -2184,7 +2186,7 @@ begin
       Result := UInt32(AReader.ReadInt32);
 
     TgoBsonType.Int64:
-      Result := AReader.ReadInt64;
+      Result := UInt64(AReader.ReadInt64);
 
     TgoBsonType.String:
       Result := StrToUInt64(AReader.ReadString);
@@ -2239,6 +2241,12 @@ begin
     end
     else
       FRegisteredSerializers.Add(ATypeInfo, Result);
+
+    { Setup serializer AFTER saving it to FRegisteredSerializers. This prevents
+      an eternal loop in case type ATypeInfo has a field of the same type,
+      which would call GetOrAddSerializer until the stack overflows.
+      Thanks to Ludwig Behm for pointing this out! }
+    Result.Setup;
   finally
     FLock.Leave;
   end;
@@ -2535,7 +2543,7 @@ end;
 class procedure TgoBsonSerializer.SerializeEnum(const AInfo: TInfo;
   const AValue: UInt32; const AWriter: IgoBsonBaseWriter);
 begin
-  if (AInfo.IgnoreIfDefault) and (AValue = 0) then
+  if (AInfo.IgnoreIfDefault) and (Integer(AValue) = AInfo.DefaultValue.FAsInt32) then
     Exit;
 
   if (AInfo.Name <> '') then
@@ -2630,7 +2638,7 @@ begin
       AWriter.WriteDouble(AValue);
 
     TgoBsonRepresentation.Int32:
-      AWriter.WriteInt32(AValue);
+      AWriter.WriteInt32(Int32(AValue));
 
     TgoBsonRepresentation.Int64:
       AWriter.WriteInt64(AValue);
@@ -2811,7 +2819,7 @@ begin
       AWriter.WriteDouble(AValue);
 
     TgoBsonRepresentation.Int32:
-      AWriter.WriteInt32(AValue);
+      AWriter.WriteInt32(Int32(AValue));
 
     TgoBsonRepresentation.Int64:
       AWriter.WriteInt64(AValue);
@@ -2928,30 +2936,12 @@ begin
   Result := FTypeInfo.Kind;
 end;
 
-{ TgoBsonSerializer.TStructSerializer }
-
-constructor TgoBsonSerializer.TStructSerializer.Create(
-  const ATypeInfo: PTypeInfo);
-var
-  Context: TRttiContext;
-  Typ: TRttiType;
+procedure TgoBsonSerializer.TSerializer.Setup;
 begin
-  inherited Create(ATypeInfo);
-  Context := TRttiContext.Create;
-  Context.KeepContext;
-  try
-    Typ := Context.GetType(ATypeInfo);
-    if (Typ = nil) then
-      raise EgoBsonSerializerError.CreateFmt('Unable to get type information for type "%s"',
-        [ATypeInfo.NameFld.ToString]);
-
-    FInfoByName := TObjectDictionary<String, TInfo>.Create([doOwnsValues]);
-    MapFields(Typ);
-    Initialize(Typ);
-  finally
-    Context.DropContext;
-  end;
+  { No default implementation }
 end;
+
+{ TgoBsonSerializer.TStructSerializer }
 
 destructor TgoBsonSerializer.TStructSerializer.Destroy;
 begin
@@ -3028,6 +3018,27 @@ begin
   begin
     Info := FFields[I];
     Info.SerializeProc(Info, ABaseAddress + Info.Offset, AWriter);
+  end;
+end;
+
+procedure TgoBsonSerializer.TStructSerializer.Setup;
+var
+  Context: TRttiContext;
+  Typ: TRttiType;
+begin
+  Context := TRttiContext.Create;
+  Context.KeepContext;
+  try
+    Typ := Context.GetType(FTypeInfo);
+    if (Typ = nil) then
+      raise EgoBsonSerializerError.CreateFmt('Unable to get type information for type "%s"',
+        [FTypeInfo.NameFld.ToString]);
+
+    FInfoByName := TObjectDictionary<String, TInfo>.Create([doOwnsValues]);
+    MapFields(Typ);
+    Initialize(Typ);
+  finally
+    Context.DropContext;
   end;
 end;
 
@@ -3416,7 +3427,6 @@ var
 begin
   inherited Create(ATypeInfo);
   TypeData := ATypeInfo.TypeData;
-//  ElementTypePtr := TypeData.elType2;
   ElementTypePtr := TypeData.DynArrElType;
   if (ElementTypePtr = nil) or (ElementTypePtr^ = nil) then
     raise EgoBsonSerializerError.CreateFmt('Unsupported element type for array type %s', [ATypeInfo.NameFld.ToString]);
@@ -3911,7 +3921,18 @@ begin
           CheckEnumRepresentation(FRepresentation);
 
         if (AType <> TypeInfo(Boolean)) and FIgnoreIfDefault and FHasDefaultValue then
-          raise EgoBsonSerializerError.Create('Custom default values are not supported for enum types');
+        begin
+          { Enum values can have a default value, but it MUST be of an integer
+            type (the ordinal value). }
+          case FDefaultValue.FRepresentation of
+            TgoBsonRepresentation.Default:
+              FDefaultValue.FRepresentation := TgoBsonRepresentation.Int32;
+
+            TgoBsonRepresentation.Int32, TgoBsonRepresentation.Int64: ;
+          else
+            raise EgoBsonSerializerError.Create('Default value for enums must be of an integer type');
+          end;
+        end;
       end;
 
     tkSet:
@@ -4463,7 +4484,7 @@ class procedure TgoBsonSerializer.TPropertyInfo.DeserializeUInt32(
   const AProp: TPropertyInfo; const AInstance: TObject;
   const AReader: IgoBsonBaseReader);
 begin
-  SetOrdProp(AInstance, AProp.Info, TgoBsonSerializer.DeserializeUInt32(AProp, AReader));
+  SetOrdProp(AInstance, AProp.Info, Int32(TgoBsonSerializer.DeserializeUInt32(AProp, AReader)));
 end;
 
 class procedure TgoBsonSerializer.TPropertyInfo.DeserializeUInt64(
@@ -4624,7 +4645,18 @@ begin
           CheckEnumRepresentation(FRepresentation);
 
         if (AType <> TypeInfo(Boolean)) and FIgnoreIfDefault and FHasDefaultValue then
-          raise EgoBsonSerializerError.Create('Custom default values are not supported for enum types');
+        begin
+          { Enum values can have a default value, but it MUST be of an integer
+            type (the ordinal value). }
+          case FDefaultValue.FRepresentation of
+            TgoBsonRepresentation.Default:
+              FDefaultValue.FRepresentation := TgoBsonRepresentation.Int32;
+
+            TgoBsonRepresentation.Int32, TgoBsonRepresentation.Int64: ;
+          else
+            raise EgoBsonSerializerError.Create('Default value for enums must be of an integer type');
+          end;
+        end;
       end;
 
     tkSet:
@@ -4852,21 +4884,21 @@ class procedure TgoBsonSerializer.TPropertyInfo.SerializeTBytes(
   const AProp: TPropertyInfo; const AInstance: TObject;
   const AWriter: IgoBsonBaseWriter);
 begin
-  TgoBsonSerializer.SerializeTBytes(AProp, GetDynArrayProp(AInstance, AProp.Info), AWriter);
+  TgoBsonSerializer.SerializeTBytes(AProp, TBytes(GetDynArrayProp(AInstance, AProp.Info)), AWriter);
 end;
 
 class procedure TgoBsonSerializer.TPropertyInfo.SerializeUInt32(
   const AProp: TPropertyInfo; const AInstance: TObject;
   const AWriter: IgoBsonBaseWriter);
 begin
-  TgoBsonSerializer.SerializeUInt32(AProp, GetOrdProp(AInstance, AProp.Info), AWriter);
+  TgoBsonSerializer.SerializeUInt32(AProp, UInt32(GetOrdProp(AInstance, AProp.Info)), AWriter);
 end;
 
 class procedure TgoBsonSerializer.TPropertyInfo.SerializeUInt64(
   const AProp: TPropertyInfo; const AInstance: TObject;
   const AWriter: IgoBsonBaseWriter);
 begin
-  TgoBsonSerializer.SerializeUInt64(AProp, GetInt64Prop(AInstance, AProp.Info), AWriter);
+  TgoBsonSerializer.SerializeUInt64(AProp, UInt64(GetInt64Prop(AInstance, AProp.Info)), AWriter);
 end;
 
 end.
